@@ -1,0 +1,15 @@
+{
+  "name": "句读 · 挖空背诵",
+  "short_name": "句读",
+  "description": "把课文变成挖空默写，用 FSRS 排期，数据只在本机。",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0f1115",
+  "theme_color": "#0f1115",
+  "icons": [
+    { "src": "./icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "./icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
