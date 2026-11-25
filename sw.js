@@ -1,6 +1,6 @@
 /* 网络优先、离线兜底：改了代码立刻生效，断网也能打开 */
-const CACHE = 'judou-v3';
-const SHELL = ['./', './index.html', './manifest.json', './src/style.css?v=2', './dist/app.js?v=2', './vendor/ts-fsrs.js'];
+const CACHE = 'judou-v4';
+const SHELL = ['./', './index.html', './manifest.json', './src/style.css?v=3', './dist/app.js?v=3', './vendor/ts-fsrs.js'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()).catch(() => {}));
