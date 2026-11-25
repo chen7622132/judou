@@ -9,7 +9,9 @@ export const DEFAULT_SETTINGS = {
   maxBlanks: 5,
   retain: 0.9,
   terms: '',
-  ai: { endpoint: 'https://api.deepseek.com/v1/chat/completions', key: '', model: 'deepseek-chat', enabled: false },
+  server: { url: '', token: '' },
+  ai: { endpoint: '', key: '', model: 'deepseek-chat', enabled: false },
+  ima: { enabled: false },
 };
 
 export const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
@@ -20,12 +22,13 @@ let _settings = null;
 export async function getSettings() {
   if (_settings) return _settings;
   const row = await db.get('kv', 'settings');
-  _settings = { ...DEFAULT_SETTINGS, ...(row?.v || {}), ai: { ...DEFAULT_SETTINGS.ai, ...(row?.v?.ai || {}) } };
+  const v = row?.v || {};
+  _settings = { ...DEFAULT_SETTINGS, ...v, server: { ...DEFAULT_SETTINGS.server, ...(v.server || {}) }, ai: { ...DEFAULT_SETTINGS.ai, ...(v.ai || {}) }, ima: { ...DEFAULT_SETTINGS.ima, ...(v.ima || {}) } };
   return _settings;
 }
 export async function saveSettings(patch) {
   const cur = await getSettings();
-  _settings = { ...cur, ...patch, ai: { ...cur.ai, ...(patch.ai || {}) } };
+  _settings = { ...cur, ...patch, server: { ...cur.server, ...(patch.server || {}) }, ai: { ...cur.ai, ...(patch.ai || {}) }, ima: { ...cur.ima, ...(patch.ima || {}) } };
   await db.put('kv', { k: 'settings', v: _settings });
   _sched = null;
   return _settings;
@@ -212,7 +215,86 @@ export async function wipe() {
   await db.clear('logs');
 }
 
-/* ---------- 可选：AI 挖空 ---------- */
+/* ---------- 中转服务（AI + ima 共用） ---------- */
+const serverBase = (s) => (s.server?.url || '').trim().replace(/\/+$/, '');
+
+function serverHeaders(s, extra = {}) {
+  const h = { 'Content-Type': 'application/json', ...extra };
+  if (s.server?.token) h['x-judou-token'] = s.server.token;
+  return h;
+}
+
+async function serverCall(path, body, { raw = false, timeout = 60000 } = {}) {
+  const s = await getSettings();
+  const base = serverBase(s);
+  if (!base) throw new Error('还没填中转服务地址（设置 → 中转服务）');
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeout);
+  let r;
+  try {
+    r = await fetch(base + path, { method: 'POST', headers: serverHeaders(s), body: JSON.stringify(body || {}), signal: ctrl.signal });
+  } catch (e) {
+    clearTimeout(timer);
+    throw new Error(e.name === 'AbortError' ? '请求超时（' + Math.round(timeout / 1000) + 's）' : '连不上中转服务：检查地址是否正确、是否已部署');
+  }
+  clearTimeout(timer);
+  if (!r.ok) {
+    let msg = 'HTTP ' + r.status;
+    try {
+      const j = await r.json();
+      msg = j.msg || j.error || msg;
+    } catch { try { const t = (await r.text()).slice(0, 160); if (t) msg = t; } catch {} }
+    throw new Error(msg);
+  }
+  if (raw) return r;
+  try { return await r.json(); } catch { throw new Error('中转服务返回的不是 JSON'); }
+}
+
+export async function pingServer() {
+  const s = await getSettings();
+  const base = serverBase(s);
+  if (!base) throw new Error('还没填中转服务地址');
+  const r = await serverCall('/ping', {});
+  return r;
+}
+
+/* ---------- ima 知识库 ---------- */
+const pickId = (x) => x.folder_id || x.id || x.media_id || x.kb_id || '';
+const pickName = (x) => x.title || x.name || x.folder_name || '(未命名)';
+
+export async function imaListKb(query = '') {
+  const d = await serverCall('/ima/kb', { query, cursor: '', limit: 20 });
+  const list = (d.info_list || d.list || []).map((x) => ({ id: pickId(x), name: pickName(x), desc: x.description || '' }));
+  return { list: list.filter((x) => x.id), isEnd: !!d.is_end, cursor: d.next_cursor || '' };
+}
+
+export async function imaFolder(kb, folder = '') {
+  const d = await serverCall('/ima/list', { kb, folder, cursor: '', limit: 50 });
+  const items = (d.knowledge_list || []).map((x) => {
+    const isFolder = x.is_folder === true || x.type === 'folder' || x.is_dir === true || (!x.media_id && !!pickId(x));
+    return { id: pickId(x), name: pickName(x), isFolder, mediaId: x.media_id || '', raw: x };
+  });
+  return { items: items.filter((x) => x.id), path: d.current_path || [], isEnd: !!d.is_end, cursor: d.next_cursor || '' };
+}
+
+export async function imaSearch(kb, query) {
+  const d = await serverCall('/ima/search', { kb, query, cursor: '' });
+  return (d.info_list || []).map((x) => ({ mediaId: x.media_id || '', name: pickName(x), hint: x.highlight_content || '' })).filter((x) => x.mediaId);
+}
+
+export async function imaFetchFile(mediaId, title = '') {
+  const r = await serverCall('/ima/file', { media_id: mediaId, title }, { raw: true, timeout: 180000 });
+  const buffer = new Uint8Array(await r.arrayBuffer());
+  let name = r.headers.get('x-filename') || '';
+  if (!name) {
+    const dispo = r.headers.get('content-disposition') || '';
+    const m = dispo.match(/filename\*?=(?:UTF-8'')?([^;]+)/i);
+    if (m) { try { name = decodeURIComponent(m[1].replace(/["']/g, '')); } catch { name = m[1]; } }
+  }
+  return { buffer, name: name || title || 'ima-文件' };
+}
+
+/* ---------- AI 挖空 ---------- */
 const AI_SYS = `你是中文背诵材料的关键词标注器。任务：从给定句子中挑出最值得挖空记忆的词或短语。
 硬性要求：
 1. 只能输出 JSON 数组，不要任何解释、不要 markdown 代码块。
@@ -221,32 +303,52 @@ const AI_SYS = `你是中文背诵材料的关键词标注器。任务：从给�
 4. 优先挖：专业术语、概念名、数量、分类词、因果链上的关键名词。禁止挖：助词、连词、语气词、代词。
 5. 最多返回 6 个。`;
 
-export async function aiBlanks(text, cfg) {
-  if (!cfg?.endpoint || !cfg?.key) throw new Error('未配置 AI');
-  const r = await fetch(cfg.endpoint, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + cfg.key },
-    body: JSON.stringify({
-      model: cfg.model,
-      temperature: 0.2,
-      messages: [{ role: 'system', content: AI_SYS }, { role: 'user', content: text }],
-    }),
-  });
-  if (!r.ok) throw new Error('API ' + r.status + ' ' + (await r.text()).slice(0, 120));
-  const j = await r.json();
-  const content = j?.choices?.[0]?.message?.content || '';
-  const m = content.match(/\[[\s\S]*\]/);
+/** 有中转服务就走中转（Key 在服务端）；否则退回直连配置 */
+export async function aiTarget() {
+  const s = await getSettings();
+  if (serverBase(s)) {
+    return { url: serverBase(s) + '/ai', headers: serverHeaders(s), model: s.ai.model || 'deepseek-chat', via: 'server' };
+  }
+  if (s.ai.endpoint && s.ai.key) {
+    return { url: s.ai.endpoint, headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + s.ai.key }, model: s.ai.model, via: 'direct' };
+  }
+  throw new Error('未配置 AI：在设置里填中转服务地址（推荐），或填接口地址 + Key');
+}
+
+function parseQuotes(text, content) {
+  const m = String(content).match(/\[[\s\S]*\]/);
   if (!m) throw new Error('模型没返回 JSON 数组');
   let arr;
   try { arr = JSON.parse(m[0]); } catch { throw new Error('JSON 解析失败'); }
   const out = [];
   for (const item of arr) {
-    const q = (item?.quote || '').trim();
+    const q = String(item?.quote || item?.word || '').trim();
     if (q.length < 2 || q.length > 14) continue;
     const at = text.indexOf(q);
-    if (at < 0) continue;                                  // 定位失败直接丢弃：绝不让模型改原文
+    if (at < 0) continue;
     if (out.some((b) => !(at + q.length <= b.start || at >= b.end))) continue;
     out.push({ start: at, end: at + q.length, answer: q });
   }
   return out.sort((a, b) => a.start - b.start);
+}
+
+export async function aiBlanks(text, cfg) {
+  const t = await aiTarget();
+  const r = await fetch(t.url, {
+    method: 'POST',
+    headers: t.headers,
+    body: JSON.stringify({
+      model: cfg?.model || t.model,
+      temperature: 0.2,
+      messages: [{ role: 'system', content: AI_SYS }, { role: 'user', content: text }],
+    }),
+  });
+  if (!r.ok) {
+    let msg = 'API ' + r.status;
+    try { const j = await r.json(); msg = j.msg || j.error?.message || j.error || msg; } catch {}
+    throw new Error(msg);
+  }
+  const j = await r.json();
+  const content = j?.choices?.[0]?.message?.content || j?.content || '';
+  return parseQuotes(text, content);
 }

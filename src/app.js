@@ -3,6 +3,7 @@
 import * as store from './store.js';
 import * as ui from './ui.js';
 import * as db from './db.js';
+import { extractText } from './extract.js';
 
 const el = document.getElementById('app');
 
@@ -12,7 +13,7 @@ const S = {
   busy: false,
   draft: { title: '', raw: '' },
   review: null,
-  lastSummary: null,
+  ima: null,
 };
 
 /* ---------- 小工具 ---------- */
@@ -55,6 +56,13 @@ async function refresh() {
     }
     else if (v === 'stats') render(ui.viewStats(await store.stats()));
     else if (v === 'settings') render(ui.viewSettings(await store.getSettings()));
+    else if (v === 'ima') {
+      if (!S.ima) {
+        const s = await store.getSettings();
+        S.ima = { mode: 'kb', kbs: [], items: [], path: [], loading: false, error: '', noServer: !s.server?.url };
+      }
+      render(ui.viewIma(S.ima));
+    }
     else if (v === 'review') render(ui.viewReview(S.review));
   } catch (e) {
     console.error(e);
@@ -101,7 +109,6 @@ function submit() {
   const okCount = r.result.filter((x) => x.ok).length;
   r.phase = 'judged';
   r.suggest = okCount === answers.length ? 3 : okCount > 0 ? 2 : 1;
-  // 预估下次时间用于展示
   store.previewNext(c).then((d) => { r.nextDue = d; if (S.view === 'review' && S.review.phase === 'judged') render(ui.viewReview(S.review)); }).catch(() => {});
   render(ui.viewReview(r));
 }
@@ -110,15 +117,13 @@ async function grade(g) {
   const r = S.review;
   if (!r) return;
   try {
-    const updated = await store.review(r.card, g);
+    await store.review(r.card, g);
     r.i++;
     if (r.i >= r.queue.length) {
       const done = r.queue.length;
-      const summary = r.result ? r.result.filter((x) => x.ok).length : 0;
       S.review = null;
-      S.lastSummary = `复习 ${done} 句`;
       await go('today');
-      toast(`${S.lastSummary} · 记得导出备份`);
+      toast(`复习 ${done} 句 · 记得导出备份`);
       return;
     }
     resetCard();
@@ -129,65 +134,86 @@ async function grade(g) {
   }
 }
 
-/* ---------- 文件解析 ---------- */
-async function pdfToText(file) {
-  const pdfjs = await import('../vendor/pdf.min.mjs');
-  pdfjs.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.mjs', import.meta.url).href;
-  const buf = new Uint8Array(await file.arrayBuffer());
-  const doc = await pdfjs.getDocument({ data: buf }).promise;
-  let out = '';
-  for (let p = 1; p <= doc.numPages; p++) {
-    const page = await doc.getPage(p);
-    const tc = await page.getTextContent();
-    const rows = new Map();
-    for (const it of tc.items) {
-      if (!it.str || !it.str.trim()) continue;
-      const y = Math.round(it.transform[5] / 4) * 4;
-      if (!rows.has(y)) rows.set(y, []);
-      rows.get(y).push({ x: it.transform[4], s: it.str });
-    }
-    const ys = [...rows.keys()].sort((a, b) => b - a);
-    let prevY = null;
-    for (const y of ys) {
-      const line = rows.get(y).sort((a, b) => a.x - b.x).map((o) => o.s).join('').trim();
-      if (!line) continue;
-      if (prevY !== null && prevY - y > 24) out += '\n';
-      out += line + '\n';
-      prevY = y;
-    }
-    out += '\n';
-  }
-  return out.replace(/[ \t]{2,}/g, ' ').trim();
+/* ---------- 文件导入 ---------- */
+async function importBuffer({ buffer, name, title }) {
+  const { text } = await extractText({ name, buffer }, (p) => { if (p === 1) toast('解析中…', 20000); });
+  if (!text || !text.trim()) throw new Error('没有提取到文字（可能是扫描件或图片）');
+  return store.importDoc({ title: (title || name || '未命名').replace(/\.[^.]+$/, ''), raw: text, source: name || 'file' });
 }
 
 async function handleFile(file) {
   if (!file) return;
-  const name = file.name.replace(/\.[^.]+$/, '');
   try {
-    let text = '';
-    if (/\.pdf$/i.test(file.name)) {
-      toast('正在解析 PDF…', 6000);
-      text = await pdfToText(file);
-    } else {
-      text = await file.text();
-    }
-    if (!text.trim()) return toast('这个文件里没有提取到文字（可能是扫描件）', 3500);
-    S.busy = true;
-    await refresh();
-    const r = await store.importDoc({ title: name, raw: text, source: file.name });
-    S.busy = false;
+    toast('正在解析 ' + file.name + '…', 20000);
+    const buffer = new Uint8Array(await file.arrayBuffer());
+    const r = await importBuffer({ buffer, name: file.name });
     S.draft = { title: '', raw: '' };
     await go('today');
     toast(`已导入《${r.doc.title}》· ${r.cards} 句`, 3000);
   } catch (e) {
-    S.busy = false;
     console.error(e);
     await refresh();
-    toast('导入失败：' + e.message, 4000);
+    toast('导入失败：' + e.message, 4500);
   }
 }
 
-/* ---------- 导入导出 ---------- */
+/* ---------- ima ---------- */
+async function imaKbList(query = '') {
+  S.ima = { ...(S.ima || {}), mode: 'kb', query, loading: true, error: '', noServer: false };
+  render(ui.viewIma(S.ima));
+  try {
+    const { list } = await store.imaListKb(query);
+    S.ima = { ...S.ima, kbs: list, loading: false };
+  } catch (e) {
+    S.ima = { ...S.ima, loading: false, error: e.message, kbs: [] };
+  }
+  render(ui.viewIma(S.ima));
+}
+
+async function imaOpenKb(id, name) {
+  S.ima = { mode: 'dir', kbId: id, kbName: name, folder: '', path: [], items: [], loading: true, error: '' };
+  await imaFolder('');
+}
+
+async function imaFolder(folder) {
+  S.ima = { ...S.ima, folder, loading: true, error: '' };
+  render(ui.viewIma(S.ima));
+  try {
+    const d = await store.imaFolder(S.ima.kbId, folder);
+    S.ima = { ...S.ima, items: d.items, path: d.path, loading: false };
+  } catch (e) {
+    S.ima = { ...S.ima, loading: false, error: e.message, items: [] };
+  }
+  render(ui.viewIma(S.ima));
+}
+
+async function imaSearchIn(query) {
+  if (!query.trim()) return toast('输入关键词');
+  S.ima = { ...S.ima, loading: true, error: '' };
+  render(ui.viewIma(S.ima));
+  try {
+    const list = await store.imaSearch(S.ima.kbId, query);
+    S.ima = { ...S.ima, loading: false, items: list.map((x) => ({ id: x.mediaId, mediaId: x.mediaId, name: x.name, isFolder: false, hint: x.hint })) };
+  } catch (e) {
+    S.ima = { ...S.ima, loading: false, error: e.message };
+  }
+  render(ui.viewIma(S.ima));
+}
+
+async function imaImport(mediaId, title) {
+  try {
+    toast('正在从 ima 取文件…', 30000);
+    const { buffer, name } = await store.imaFetchFile(mediaId, title);
+    const r = await importBuffer({ buffer, name, title });
+    await go('today');
+    toast(`已导入《${r.doc.title}》· ${r.cards} 句`, 3000);
+  } catch (e) {
+    console.error(e);
+    toast('导入失败：' + e.message, 5000);
+  }
+}
+
+/* ---------- 备份 ---------- */
 async function doExport() {
   const data = await store.exportAll();
   const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
@@ -203,8 +229,14 @@ async function doExport() {
 
 async function doImport(file) {
   try {
-    const text = await file.text();
-    const r = await store.importAll(JSON.parse(text));
+    const j = JSON.parse(await file.text());
+    if (j.type === 'judou-material' || (j.title && j.text && !j.app)) {
+      const r = await store.importDoc({ title: j.title || '材料包', raw: j.text, source: 'material' });
+      await refresh();
+      toast(`已导入《${r.doc.title}》· ${r.cards} 句`);
+      return;
+    }
+    const r = await store.importAll(j);
     await refresh();
     toast(`已导入 ${r.cards} 句 / ${r.docs} 篇`);
   } catch (e) {
@@ -214,11 +246,10 @@ async function doImport(file) {
 
 /* ---------- 事件 ---------- */
 document.addEventListener('click', async (ev) => {
-  const t = ev.target.closest('[data-go],[data-act],[data-grade],[data-doc],[data-blank],[data-card]');
+  const t = ev.target.closest('[data-go],[data-act],[data-grade],[data-doc],[data-blank],[data-card],[data-ima-kb],[data-ima-folder],[data-ima-file]');
   if (!t) return;
 
   if (t.dataset.go) return go(t.dataset.go);
-
   if (t.dataset.grade) return grade(+t.dataset.grade);
 
   if (t.dataset.blank !== undefined && S.review) {
@@ -230,11 +261,11 @@ document.addEventListener('click', async (ev) => {
     return;
   }
 
-  if (t.dataset.doc) {
-    if (t.tagName === 'BUTTON' || t.classList.contains('t')) return go('doc', { docId: t.dataset.doc });
-  }
-
+  if (t.dataset.doc) return go('doc', { docId: t.dataset.doc });
   if (t.dataset.card) return startReview([t.dataset.card]);
+  if (t.dataset.imaKb) return imaOpenKb(t.dataset.imaKb, t.dataset.imaName || '');
+  if (t.hasAttribute('data-ima-folder')) return imaFolder(t.dataset.imaFolder || '');
+  if (t.dataset.imaFile) return imaImport(t.dataset.imaFile, t.dataset.imaTitle || '');
 
   const act = t.dataset.act;
   if (act === 'start') {
@@ -255,6 +286,19 @@ document.addEventListener('click', async (ev) => {
     } catch (e) { S.busy = false; await refresh(); toast('失败：' + e.message, 4000); }
     return;
   }
+  if (act === 'go-ima') {
+    const s = await store.getSettings();
+    S.ima = { mode: 'kb', kbs: [], items: [], path: [], loading: false, error: '', noServer: !s.server?.url };
+    await go('ima');
+    if (s.server?.url) return imaKbList('');
+    return;
+  }
+  if (act === 'ima-back') {
+    if (S.ima?.mode === 'dir') { S.ima = { ...S.ima, mode: 'kb' }; return imaKbList(S.ima.query || ''); }
+    return go('docs');
+  }
+  if (act === 'ima-search') return imaKbList(document.getElementById('ima-q')?.value || '');
+  if (act === 'ima-search-in') return imaSearchIn(document.getElementById('ima-q2')?.value || '');
   if (act === 'back') return go('docs');
   if (act === 'reblank') {
     if (!S.docId) return;
@@ -271,10 +315,7 @@ document.addEventListener('click', async (ev) => {
     toast('已删除');
     return;
   }
-  if (act === 'quit') {
-    S.review = null;
-    return go('today');
-  }
+  if (act === 'quit') { S.review = null; return go('today'); }
   if (act === 'reveal') {
     S.review.revealAll = true;
     S.review.phase = 'self';
@@ -291,21 +332,37 @@ document.addEventListener('click', async (ev) => {
     toast('已清空');
     return;
   }
+  if (act === 'srv-save') {
+    const url = document.getElementById('srv-url').value.trim();
+    const token = document.getElementById('srv-token').value.trim();
+    await store.saveSettings({ server: { url, token } });
+    toast(url ? '中转服务已保存' : '已清空');
+    await refresh();
+    return;
+  }
+  if (act === 'srv-test') {
+    try {
+      toast('连接中…', 15000);
+      const r = await store.pingServer();
+      toast(`连上了 · AI ${r.ai ? '可用' : '未配置'} · ima ${r.ima ? '可用' : '未配置'}${r.model ? ' · ' + r.model : ''}`, 4500);
+    } catch (e) { toast('失败：' + e.message, 5000); }
+    return;
+  }
   if (act === 'ai-save') {
-    const endpoint = document.getElementById('ai-endpoint').value.trim();
-    const key = document.getElementById('ai-key').value.trim();
     const model = document.getElementById('ai-model').value.trim();
-    await store.saveSettings({ ai: { endpoint, key, model, enabled: !!(endpoint && key) } });
-    toast(endpoint && key ? 'AI 已启用（导入时尝试 AI 挖空）' : '已保存，但未启用');
+    const endpoint = document.getElementById('ai-endpoint')?.value.trim() || '';
+    const key = document.getElementById('ai-key')?.value.trim() || '';
+    await store.saveSettings({ ai: { endpoint, key, model, enabled: true } });
+    toast('已保存');
+    await refresh();
     return;
   }
   if (act === 'ai-test') {
-    const s = await store.getSettings();
-    if (!s.ai.key) return toast('先填 Key 并保存');
     try {
-      toast('请求中…', 8000);
-      const r = await store.aiBlanks('决策是管理者识别并解决问题以及利用机会的过程。', s.ai);
-      toast(r.length ? '成功，返回 ' + r.length + ' 个挖空：' + r.map((x) => x.answer).join('、') : '连上了，但没返回可用挖空', 4000);
+      toast('请求中…', 20000);
+      const s = await store.getSettings();
+      const r = await store.aiBlanks('决策是管理者识别并解决问题以及利用机会的过程。满意原则是决策的基本原则。', s.ai);
+      toast(r.length ? `成功：${r.map((x) => x.answer).join('、')}` : '连上了，但没返回可用挖空', 4000);
     } catch (e) { toast('失败：' + e.message, 5000); }
     return;
   }
@@ -324,6 +381,7 @@ document.addEventListener('input', (ev) => {
 
 document.addEventListener('keydown', (ev) => {
   if (ev.target.id === 'ans' && ev.key === 'Enter') { ev.preventDefault(); submit(); }
+  if (ev.target.id === 'ima-q2' && ev.key === 'Enter') { ev.preventDefault(); imaSearchIn(ev.target.value); }
 });
 
 document.addEventListener('change', async (ev) => {
@@ -339,8 +397,6 @@ document.addEventListener('change', async (ev) => {
 /* ---------- 启动 ---------- */
 (async function boot() {
   try { await db.open(); } catch (e) { console.warn(e); }
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('./sw.js').catch(() => {});
-  }
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
   await go('today');
 })();

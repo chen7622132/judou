@@ -81,7 +81,7 @@ export function splitBlocks(raw) {
     let body = lines;
     const h = para.match(/^#{1,6}\s+(.+)$/);
     if (h) {
-      currentTitle = h[1].trim();
+      currentTitle = h[1].replace(/^#+\s*/, '').trim();
       body = para.replace(/^#{1,6}\s+.+$/m, '').split('\n').map((l) => l.trim()).filter(Boolean);
     } else if (lines.length > 1 && lines[0].length <= 30 && !/[。！？；，]/.test(lines[0]) && /[\u4e00-\u9fa5A-Za-z]/.test(lines[0])) {
       currentTitle = lines[0];

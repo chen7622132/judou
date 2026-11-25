@@ -162,11 +162,13 @@ ${header('资料', docs.length ? `${docs.length} 篇` : '')}
     <div class="row" style="gap:8px">
       <button class="btn primary" data-act="import-text" style="flex:1;height:50px" ${busy ? 'disabled' : ''}>${busy ? '处理中…' : '导入并挖空'}</button>
       <label class="btn ghost" style="flex:0 0 96px;height:50px;border-color:#39425a;color:var(--fg)">
-        选文件<input id="file" type="file" accept=".txt,.md,.markdown,.pdf,text/plain" hidden>
+        选文件<input id="file" type="file" accept=".pdf,.docx,.pptx,.epub,.txt,.md,.markdown,.html,.htm" hidden>
       </label>
     </div>
-    <div class="tiny" style="margin-top:8px">支持 txt / md / pdf。PDF 为扫描件时提不出文字。</div>
+    <div class="tiny" style="margin-top:8px">支持 pdf / docx / pptx / epub / txt / md。扫描件提不出文字。</div>
   </div>
+
+  <button class="btn block" data-act="go-ima" style="margin-bottom:12px">⤓ 从 ima 知识库导入</button>
 
   ${docs.length ? `
   <div class="card">
@@ -246,6 +248,7 @@ ${tabbar('stats')}`;
 
 /* ---------- 设置 ---------- */
 export function viewSettings(s) {
+  const hasServer = !!(s.server && s.server.url);
   return `
 ${header('设置')}
 <main>
@@ -260,7 +263,7 @@ ${header('设置')}
     </div>
     <div class="set-row">
       <div class="lab">目标留存率<small>越高复习越频繁 · ${s.retain}</small></div>
-      <select id="retain" style="background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:8px 10px">
+      <select id="retain">
         ${[0.8, 0.85, 0.9, 0.95].map((v) => `<option value="${v}" ${String(v) === String(s.retain) ? 'selected' : ''}>${v}</option>`).join('')}
       </select>
     </div>
@@ -269,27 +272,46 @@ ${header('设置')}
   <div class="card">
     <label class="field" style="margin:0">
       <span>术语表（一行一个，命中优先挖）</span>
-      <textarea id="terms" style="min-height:90px" placeholder="满意原则&#10;计划部门&#10;例外管理&#10;需求价格弹性">${esc(s.terms)}</textarea>
+      <textarea id="terms" style="min-height:92px" placeholder="满意原则&#10;计划部门&#10;例外管理&#10;需求价格弹性">${esc(s.terms)}</textarea>
     </label>
-    <div class="tiny" style="margin-top:6px">这是最有效的优化：把你学科的概念名放进来，挖空就不会挖到形容词上。</div>
+    <div class="tiny" style="margin-top:6px">最有效的优化：把学科概念名放进来，挖空就不会挖到形容词上。</div>
+  </div>
+
+  <div class="card">
+    <div class="row between" style="margin-bottom:4px">
+      <b style="font-size:14px">中转服务</b>
+      <span class="tiny">${hasServer ? '已配置' : '未配置'}</span>
+    </div>
+    <div class="tiny" style="margin-bottom:12px;line-height:1.6">
+      AI 和 ima 知识库都需要它：浏览器不能直连这两家（跨域 + Key 不能放前端）。
+      部署一个 Worker 填在这里，两项功能一起通。
+    </div>
+    <label class="field"><span>服务地址</span>
+      <input id="srv-url" type="url" placeholder="https://xxx.workers.dev" value="${esc(s.server?.url || '')}"></label>
+    <label class="field"><span>访问口令（与服务端 ACCESS_TOKEN 一致）</span>
+      <input id="srv-token" type="password" placeholder="可留空" value="${esc(s.server?.token || '')}"></label>
+    <div class="row" style="gap:8px">
+      <button class="btn sm" data-act="srv-save" style="flex:1">保存</button>
+      <button class="btn sm ghost" data-act="srv-test" style="flex:1">测试连接</button>
+    </div>
   </div>
 
   <div class="card">
     <div class="row between" style="margin-bottom:10px">
-      <b style="font-size:14px">AI 挖空（可选）</b>
-      <span class="tiny">${s.ai.enabled ? '已开启' : '未开启'}</span>
+      <b style="font-size:14px">AI 挖空</b>
+      <span class="tiny">${hasServer ? '走中转服务' : s.ai.key ? '走直连' : '未配置'}</span>
     </div>
-    <label class="field"><span>接口地址（需支持浏览器跨域，建议自建 Worker 中转）</span>
-      <input id="ai-endpoint" type="url" value="${esc(s.ai.endpoint)}"></label>
-    <label class="field"><span>API Key（只存在本机）</span>
-      <input id="ai-key" type="password" value="${esc(s.ai.key)}" placeholder="sk-..."></label>
-    <label class="field"><span>模型</span>
-      <input id="ai-model" type="text" value="${esc(s.ai.model)}"></label>
-    <div class="row" style="gap:8px">
-      <button class="btn sm" data-act="ai-save" style="flex:1">保存并启用</button>
-      <button class="btn sm ghost" data-act="ai-test">测试一句</button>
+    <label class="field"><span>模型名</span>
+      <input id="ai-model" type="text" placeholder="deepseek-chat" value="${esc(s.ai.model || '')}"></label>
+    ${hasServer ? `<div class="tiny">Key 存在中转服务里，前端不接触。</div>` : `
+      <label class="field"><span>接口地址（会跨域失败，仅备用）</span>
+        <input id="ai-endpoint" type="url" value="${esc(s.ai.endpoint || '')}"></label>
+      <label class="field"><span>API Key</span>
+        <input id="ai-key" type="password" value="${esc(s.ai.key || '')}" placeholder="sk-..."></label>`}
+    <div class="row" style="gap:8px;margin-top:4px">
+      <button class="btn sm" data-act="ai-save" style="flex:1">保存</button>
+      <button class="btn sm ghost" data-act="ai-test" style="flex:1">测试一句</button>
     </div>
-    <div class="tiny" style="margin-top:8px">默认关闭。直连 api.deepseek.com 会被浏览器 CORS 拦截，需要一个中转地址（见 README）。</div>
   </div>
 
   <div class="card">
@@ -301,9 +323,77 @@ ${header('设置')}
   </div>
 
   <p class="tiny" style="text-align:center;line-height:1.9">
-    句读 v1 · 数据全在本机 IndexedDB<br>
-    排期算法 FSRS-6（ts-fsrs）· PDF 解析 pdf.js · 分词 Intl.Segmenter
+    句读 v1.1 · 数据全在本机 IndexedDB<br>
+    FSRS-6（ts-fsrs）· PDF（pdf.js）· 分词（Intl.Segmenter）· 文档解析（fflate）
   </p>
 </main>
 ${tabbar('settings')}`;
+}
+
+/* ---------- 从 ima 导入 ---------- */
+export function viewIma(st) {
+  const head = `
+${header('从 ima 导入', st.kbName || (st.mode === 'dir' ? '' : ''), `<button class="icon-btn" data-act="ima-back">←</button>`)}`;
+
+  if (st.noServer) {
+    return `${head}
+<main>
+  <div class="empty"><span class="big">⇄</span>
+    需要先配置中转服务<br>
+    <span class="tiny">浏览器不能直连 ima 的接口（跨域限制），<br>必须用一个中转地址转发</span>
+  </div>
+  <button class="btn primary block" data-go="settings">去设置</button>
+</main>`;
+  }
+
+  if (st.mode === 'kb') {
+    return `${head}
+<main>
+  <div class="card">
+    <div class="row" style="gap:8px">
+      <input id="ima-q" type="text" placeholder="搜索知识库，留空列出全部" value="${esc(st.query || '')}">
+      <button class="btn sm" data-act="ima-search">搜索</button>
+    </div>
+  </div>
+  ${st.loading ? `<div class="empty">读取中…</div>` : st.error ? `<div class="card" style="color:var(--bad);font-size:14px">${esc(st.error)}</div>` : ''}
+  ${st.kbs.length ? `<div class="card">
+    ${st.kbs.map((k) => `
+      <div class="doc-item">
+        <div class="t"><b>${esc(k.name)}</b><span>${esc(k.desc || k.id)}</span></div>
+        <button class="btn sm ghost" data-ima-kb="${esc(k.id)}" data-ima-name="${esc(k.name)}">打开</button>
+      </div>`).join('')}
+  </div>` : (!st.loading && !st.error ? `<div class="empty"><span class="big">▤</span>没有找到知识库</div>` : '')}
+</main>`;
+  }
+
+  const chain = (st.path || []).filter((p) => p.folder_id);
+  const up = chain.length >= 2 ? chain[chain.length - 2].folder_id : '';
+  const crumbs = [
+    chain.length ? `<button class="btn sm ghost" data-ima-folder="${esc(up)}">↑ 上一级</button>` : '',
+    `<button class="btn sm ghost" data-ima-folder="">根目录</button>`,
+  ].concat(chain.map((p) => `<span class="tiny">/</span><button class="btn sm ghost" data-ima-folder="${esc(p.folder_id)}">${esc(p.name || p.folder_id)}</button>`))
+    .filter(Boolean).join('');
+
+  return `${head}
+<main>
+  <div class="row" style="gap:6px;flex-wrap:wrap;margin-bottom:10px">${crumbs}</div>
+  <div class="card">
+    <div class="row" style="gap:8px;margin-bottom:10px">
+      <input id="ima-q2" type="text" placeholder="在这个库里搜内容" value="">
+      <button class="btn sm" data-act="ima-search-in">搜索</button>
+    </div>
+    <div class="tiny" style="margin-bottom:8px">搜到结果后，点条目直接导入</div>
+  </div>
+  ${st.loading ? `<div class="empty">读取中…</div>` : ''}
+  ${st.error ? `<div class="card" style="color:var(--bad);font-size:14px">${esc(st.error)}</div>` : ''}
+  ${st.items.length ? `<div class="card">
+    ${st.items.map((it) => `
+      <div class="doc-item">
+        <div class="t"><b>${it.isFolder ? '▸ ' : ''}${esc(it.name)}</b><span>${it.isFolder ? '文件夹' : '文档'}</span></div>
+        ${it.isFolder
+          ? `<button class="btn sm ghost" data-ima-folder="${esc(it.id)}">进入</button>`
+          : `<button class="btn sm" data-ima-file="${esc(it.mediaId || it.id)}" data-ima-title="${esc(it.name)}">导入</button>`}
+      </div>`).join('')}
+  </div>` : (!st.loading ? `<div class="empty"><span class="big">▤</span>这个目录是空的</div>` : '')}
+</main>`;
 }
